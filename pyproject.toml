@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gen_readme"
+version = "0.1.0"
+description = "A tool to generate README.md for packages using an LLM."
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "halo",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["gen_readme"]
+
+[project.scripts]
+gen-readme = "gen_readme.app:main"
