@@ -1,78 +1,112 @@
 import tempfile
 import os
-import atexit
+import shutil
 import sys
-from typing import List, Iterator
+from typing import List, Iterator, Optional
 
 CHUNK_SIZE = 16 * 1024  # 16KB
 
 
-def _cleanup_temp_file(path: str):
+class TempDirManager:
     """
-    atexit 핸들러로 등록될 함수. 주어진 경로의 파일을 삭제합니다.
+    임시 디렉터리 및 그 안의 파일 생성을 관리하고 사용 후 정리하는 컨텍스트 관리자.
+
+    사용 예시:
+    with TempDirManager() as temp_manager:
+        file_paths = temp_manager.save_content_to_temp_files(content_iterator)
+        # ... 파일 처리 ...
+    # 'with' 블록을 빠져나가면 임시 디렉터리와 모든 파일이 자동으로 삭제됩니다.
     """
-    if path and os.path.exists(path):
+
+    def __init__(self, root_dir: Optional[str] = None):
+        self._root_dir = root_dir
+        self.temp_dir: Optional[str] = None
+        self.created_files: List[str] = []
+
+    def __enter__(self) -> "TempDirManager":
         try:
-            os.remove(path)
-            print(f"[정보] 임시 파일이 삭제되었습니다: {path}")
-        except OSError as e:
-            print(f"[에러] 임시 파일 삭제 중 오류가 발생했습니다: {path} ({e})", file=sys.stderr)
+            self.temp_dir = tempfile.mkdtemp(dir=self._root_dir)
+            print(f"[정보] 임시 디렉터리가 생성되었습니다: {self.temp_dir}")
+        except Exception as e:
+            print(f"[에러] 임시 디렉터리 생성에 실패했습니다: {e}", file=sys.stderr)
+            raise
+        return self
 
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
 
-def save_content_to_temp_files(content_iterator: Iterator[str], root_dir: str) -> List[str]:
-    """
-    주어진 내용 스트림(iterator)을 16KB 단위로 나누어 지정된 디렉터리에 임시 파일들로 저장하고,
-    프로그램 종료 시 해당 파일들이 삭제되도록 atexit 핸들러를 등록합니다.
+    def save_content_to_temp_files(
+        self, content_iterator: Iterator[str]
+    ) -> List[str]:
+        """
+        주어진 내용 스트림을 16KB 단위로 나누어 임시 파일들로 저장합니다.
+        파일은 관리자 인스턴스에 의해 추적됩니다.
 
-    :param content_iterator: 파일에 저장할 문자열 내용 스트림
-    :param root_dir: 임시 파일을 생성할 디렉터리
-    :return: 생성된 임시 파일들의 경로 리스트.
-    """
-    created_files: List[str] = []
-    f = None
-    file_path = None
-    file_count = 0
+        :param content_iterator: 파일에 저장할 문자열 내용 스트림
+        :return: 생성된 임시 파일들의 경로 리스트.
+        """
+        if not self.temp_dir:
+            raise Exception("임시 디렉터리가 설정되지 않았습니다. 'with' 구문 안에서 사용해야 합니다.")
 
-    try:
-        for chunk in content_iterator:
-            if f is None:
-                file_count += 1
-                f = tempfile.NamedTemporaryFile(
-                    "w",
-                    encoding="utf-8",
-                    suffix=f"_part_{file_count}.txt",
-                    delete=False,
-                    dir=root_dir, 
-                )
-                file_path = f.name
-                created_files.append(file_path)
-                atexit.register(_cleanup_temp_file, file_path)
+        f = None
+        file_count = 0
 
-            f.write(chunk)
+        try:
+            for chunk in content_iterator:
+                if f is None:
+                    file_count += 1
+                    f = tempfile.NamedTemporaryFile(
+                        "w",
+                        encoding="utf-8",
+                        suffix=f"_part_{file_count}.txt",
+                        delete=False,
+                        dir=self.temp_dir,
+                    )
+                    self.created_files.append(f.name)
 
-            if f.tell() > CHUNK_SIZE:
+                f.write(chunk)
+
+                if f.tell() > CHUNK_SIZE:
+                    f.close()
+                    f = None
+
+            if f is not None:
                 f.close()
-                f = None
-        
-        if f is not None:
-            f.close()
-            
-        if len(created_files) > 1:
-            print(f"[정보] 수집된 컨텍스트가 {len(created_files)}개의 임시 파일로 분할 저장되었습니다.")
-            for path in created_files:
-                print(f"  - {path}")
-        elif created_files:
-            print(f"[정보] 수집된 컨텍스트가 임시 파일에 저장되었습니다: {created_files[0]}")
-        
-        return created_files
 
-    except Exception as e:
-        if f:
-            f.close()
-        print(f"[경고] 임시 파일 생성에 실패했습니다: {e}", file=sys.stderr)
-        for path in created_files:
-            _cleanup_temp_file(path)
-        return []
+            if len(self.created_files) > 1:
+                print(
+                    f"[정보] 수집된 컨텍스트가 {len(self.created_files)}개의 임시 파일로 분할 저장되었습니다."
+                )
+                for path in self.created_files:
+                    print(f"  - {path}")
+            elif self.created_files:
+                print(
+                    f"[정보] 수집된 컨텍스트가 임시 파일에 저장되었습니다: {self.created_files[0]}"
+                )
+
+            return self.created_files
+
+        except Exception as e:
+            if f:
+                f.close()
+            print(f"[경고] 임시 파일 생성에 실패했습니다: {e}", file=sys.stderr)
+            # 실패 시에도 __exit__에서 정리되므로 여기서 즉시 삭제할 필요는 없음
+            return []
+
+    def cleanup(self):
+        """임시 디렉터리와 그 안의 모든 파일을 삭제합니다."""
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+                print(f"[정보] 임시 디렉터리 및 모든 파일이 삭제되었습니다: {self.temp_dir}")
+            except OSError as e:
+                print(
+                    f"[에러] 임시 디렉터리 삭제 중 오류가 발생했습니다: {self.temp_dir} ({e})",
+                    file=sys.stderr,
+                )
+        self.temp_dir = None
+        self.created_files = []
+
 
 def read_content_from_files(file_paths: List[str]) -> str:
     """

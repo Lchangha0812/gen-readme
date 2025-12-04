@@ -1,7 +1,5 @@
 import argparse
 
-from .providers import get_available_providers
-
 DEFAULT_README_NAME = "README.md"
 
 

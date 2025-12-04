@@ -52,6 +52,7 @@ class GeminiPromptBuilder:
         self, file_paths: List[str], request: str | None
     ) -> str:
         """새로운 README.md 파일을 생성하기 위한 프롬프트를 구성합니다."""
+        # !NOTE 비대화형으로 진행시 tool or 쉘 커맨드 를 통한 파일 read가 불안정함 따라서 파일경로를 절대경로로 인젝션 시킴
         file_path_str = " , ".join([f"@{p}" for p in file_paths])
         
         situation = textwrap.dedent("""
