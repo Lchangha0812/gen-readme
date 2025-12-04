@@ -57,3 +57,29 @@ def get_git_diff_for_path(path: pathlib.Path) -> str | None:
         return working.stdout
 
     return None
+
+
+def get_tracked_files(root_dir: str) -> list[str]:
+    """
+    지정된 디렉터리에서 git이 추적하는 파일 및 무시되지 않는 파일 목록을 반환합니다.
+
+    :param root_dir: 검색을 시작할 git 저장소 내 디렉터리
+    :return: 절대 경로의 파일 목록
+    """
+    git_root = find_git_root(pathlib.Path(root_dir))
+    if not git_root:
+        return []
+
+    # git ls-files를 사용하여 staging 되는 파일들 가져옴
+    result = run_cmd(
+        ["git", "ls-files", "--cached", "--exclude-standard"], cwd=git_root
+    )
+
+    if result.returncode != 0:
+        print(f"[경고] git 추적 파일 목록을 가져오는 데 실패했습니다: {result.stderr}")
+        return []
+
+    files = result.stdout.strip().split("\n")
+    # 상대 경로를 절대 경로로 변환
+    return [str(git_root.joinpath(f).resolve()) for f in files if f]
+

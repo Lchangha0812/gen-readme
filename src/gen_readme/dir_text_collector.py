@@ -1,5 +1,6 @@
 import os
 from typing import Callable, Iterator
+from . import git_utils
 
 
 def is_probably_binary(file_path: str, block_size: int = 1024) -> bool:
@@ -18,24 +19,40 @@ def is_probably_binary(file_path: str, block_size: int = 1024) -> bool:
         return True
 
 
-def stream_all_files(
-    root_dir: str,
-    skip_hidden: bool = True,
-    file_filter: Callable[[str], bool] | None = None,
+def _stream_files_from_git(root_dir: str, chunk_size: int) -> Iterator[str]:
+    """Git 추적 파일을 스트리밍합니다."""
+    tracked_files = git_utils.get_tracked_files(root_dir)
+    if not tracked_files:
+        print("[정보] Git 추적 파일을 찾을 수 없습니다.")
+        return
+
+    print(f"[정보] .gitignore를 기준으로 {len(tracked_files)}개의 파일을 수집합니다.")
+    for file_path in tracked_files:
+        if not os.path.exists(file_path) or os.path.islink(file_path):
+            continue
+        if is_probably_binary(file_path):
+            continue
+        
+        relative_path = os.path.relpath(file_path, root_dir)
+        yield f"\n\n===== FILE: {relative_path} =====\n\n"
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                while True:
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+        except Exception as e:
+            print(f"[경고] 파일 읽기 실패: {file_path} ({e})")
+            continue
+
+
+def _stream_files_from_walk(
+    root_dir: str, skip_hidden: bool, chunk_size: int
 ) -> Iterator[str]:
-    """
-    주어진 디렉터리를 재귀적으로 돌면서 '읽을 수 있는' 파일 내용을
-    16KB 스트림(generator)으로 반환한다.
-
-    :param root_dir: 시작 디렉터리 경로
-    :param skip_hidden: 숨김 파일/디렉터리(.으로 시작)를 건너뛸지 여부
-    :param file_filter: 파일 경로를 받아 True/False를 리턴하는 필터 함수.
-    :return: 파일 내용을 청크 단위로 yield하는 제너레이터
-    """
-    CHUNK_SIZE = 16 * 1024
-
+    """os.walk를 사용하여 모든 파일을 스트리밍합니다."""
+    print("[정보] Git 저장소가 아니므로, 숨김 파일을 제외하고 모든 파일을 수집합니다.")
     for dirpath, dirnames, filenames in os.walk(root_dir):
-        # 숨김 디렉터리 스킵
         if skip_hidden:
             dirnames[:] = [d for d in dirnames if not d.startswith(".")]
 
@@ -44,27 +61,38 @@ def stream_all_files(
                 continue
 
             file_path = os.path.join(dirpath, filename)
-
-            if os.path.islink(file_path):
+            if os.path.islink(file_path) or is_probably_binary(file_path):
                 continue
-
-            if file_filter is not None and not file_filter(file_path):
-                continue
-
-            if is_probably_binary(file_path):
-                continue
-
-            yield f"\n\n===== FILE: {file_path} =====\n\n"
-
+            
+            relative_path = os.path.relpath(file_path, root_dir)
+            yield f"\n\n===== FILE: {relative_path} =====\n\n"
             try:
-                # 스트리밍 방식에서는 인코딩을 미리 확정해야 하므로,
-                # 가장 무난한 utf-8(에러 무시)를 사용합니다.
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                     while True:
-                        chunk = f.read(CHUNK_SIZE)
+                        chunk = f.read(chunk_size)
                         if not chunk:
                             break
                         yield chunk
             except Exception as e:
-                print(f"[WARN] 파일 스트리밍 읽기 실패: {file_path} ({e})")
+                print(f"[경고] 파일 읽기 실패: {file_path} ({e})")
                 continue
+
+
+def stream_all_files(
+    root_dir: str,
+    skip_hidden: bool = True,
+    **kwargs, # 이전 버전 호환성을 위해 file_filter 등의 인자를 받음
+) -> Iterator[str]:
+    """
+    디렉터리 파일 내용을 스트림으로 반환합니다.
+    Git 저장소인 경우 .gitignore를 존중하고, 그렇지 않은 경우 모든 파일을 탐색합니다.
+    """
+    CHUNK_SIZE = 16 * 1024
+    
+    # git_utils.find_git_root는 pathlib.Path 객체를 요구합니다.
+    from pathlib import Path
+
+    if git_utils.find_git_root(Path(root_dir)):
+        yield from _stream_files_from_git(root_dir, CHUNK_SIZE)
+    else:
+        yield from _stream_files_from_walk(root_dir, skip_hidden, CHUNK_SIZE)
