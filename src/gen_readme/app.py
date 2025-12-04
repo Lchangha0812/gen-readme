@@ -1,18 +1,39 @@
 import pathlib
 import sys
+from typing import Iterator
 
-from . import git_utils
+from . import dir_text_collector, temp_utils
 from .providers import get_provider
-from .config import parse_args, DEFAULT_README_NAME, DEFAULT_TEMPLATE_FILE
+from .config import parse_args, DEFAULT_README_NAME
 
 
 def load_template(template_path: pathlib.Path) -> str:
+    """템플릿 파일을 읽어서 반환"""
+    if not template_path.is_file():
+        raise RuntimeError(f"템플릿 파일이 존재하지 않습니다: {template_path}")
     try:
         return template_path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        raise RuntimeError(f"템플릿 파일을 찾을 수 없습니다: {template_path}")
-    except UnicodeDecodeError:
-        raise RuntimeError(f"템플릿 파일을 UTF-8로 읽을 수 없습니다: {template_path}")
+    except Exception as e:
+        raise RuntimeError(f"템플릿 파일을 읽는 중 오류 발생: {e}") from e
+
+
+def combine_streams(
+    file_stream: Iterator[str],
+    existing_readme_content: str | None,
+    readme_path: str,
+    template_content: str | None,
+    template_path: str | None,
+) -> Iterator[str]:
+    """기존 README 및 템플릿 내용을 파일 내용 스트림에 추가합니다."""
+    if template_content and template_path:
+        yield f"===== FILE: {template_path} (README 템플릿) =====\n\n"
+        yield template_content
+
+    if existing_readme_content:
+        yield f"===== FILE: {readme_path} (기존 README) =====\n\n"
+        yield existing_readme_content
+
+    yield from file_stream
 
 
 def main() -> int:
@@ -29,61 +50,63 @@ def main() -> int:
         print(f"[에러] 패키지 경로가 존재하지 않거나 디렉터리가 아닙니다: {pkg}", file=sys.stderr)
         return 1
 
-    template_text: str | None = None
+    # 템플릿 처리
+    template_content: str | None = None
+    template_path: pathlib.Path | None = None
     if args.template:
-        template_path = pathlib.Path(args.template)
+        template_path = pathlib.Path(args.template).resolve()
         try:
-            template_text = load_template(template_path)
+            template_content = load_template(template_path)
         except RuntimeError as e:
             print(f"[에러] {e}", file=sys.stderr)
             return 1
 
+    # 기존 README 처리
     readme_path = pkg / DEFAULT_README_NAME
     readme_exists = readme_path.exists()
+    existing_readme_content: str | None = None
+    if readme_exists:
+        try:
+            existing_readme_content = readme_path.read_text(encoding="utf-8")
+        except Exception as e:
+            print(f"[경고] 기존 README 파일을 읽는 데 실패했습니다: {e}", file=sys.stderr)
 
-    diff_text = None
-    try:
-        diff_text = git_utils.get_git_diff_for_path(pkg)
-    except Exception:
-        # git이 없거나, repo가 아니거나, 에러가 나면 그냥 무시하고 diff 없음으로 처리
-        diff_text = None
-
-    # 1. 파일 상태에 따라 액션 결정
-    action = ""
-    if not readme_exists:
-        action = "new"
-        print(f"[{args.prompt_mode} mode] 신규 README 생성을 시작합니다.")
-    elif diff_text:
-        action = "update_with_diff"
-        print(f"[{args.prompt_mode} mode] Git diff를 기반으로 README 수정을 시작합니다.")
-    else:
-        action = "update_full_scan"
-        print(f"[{args.prompt_mode} mode] 전체 코드를 기반으로 README 개선을 시작합니다.")
-
-    # 2. 모드와 액션에 따라 적절한 프롬프트 생성 메서드 호출
-    generated_prompt = ""
-    if args.prompt_mode == "direct":
-        if action == "new":
-            generated_prompt = provider.build_direct_prompt_new(pkg, args.request)
-        elif action == "update_with_diff":
-            generated_prompt = provider.build_direct_prompt_update_with_diff(pkg, diff_text, args.request)
-        else:  # update_full_scan
-            generated_prompt = provider.build_direct_prompt_update_full_scan(pkg, args.request)
-    else:  # structured
-        if action == "new":
-            generated_prompt = provider.build_prompt_new(pkg, template_text, args.request)
-        elif action == "update_with_diff":
-            generated_prompt = provider.build_prompt_update_with_diff(pkg, template_text, diff_text, args.request)
-        else:  # update_full_scan
-            generated_prompt = provider.build_prompt_update_full_scan(pkg, template_text, args.request)
+    # 모든 컨텍스트(템플릿, 기존 README, 파일 목록)를 스트림으로 결합
+    file_content_stream = dir_text_collector.stream_all_files(str(pkg))
+    full_content_stream = combine_streams(
+        file_stream=file_content_stream,
+        existing_readme_content=existing_readme_content,
+        readme_path=str(readme_path),
+        template_content=template_content,
+        template_path=str(template_path) if template_path else None,
+    )
     
-    # LLM 호출
+    # 스트림을 임시 파일로 저장
+    temp_file_paths = temp_utils.save_content_to_temp_files(
+        full_content_stream, str(pkg)
+    )
+
+    action = "new" if not readme_exists else "update"
+    print(f"'{action}' 액션을 시작합니다.")
+
+    # 프롬프트 생성 및 LLM 호출
+    generated_prompt = ""
+    if action == "new":
+        generated_prompt = provider.build_prompt_new(
+            temp_file_paths, args.request
+        )
+    else:  # update
+        generated_prompt = provider.build_prompt_update(
+            temp_file_paths, args.request
+        )
+
     try:
-        readme_content = provider.call_llm(generated_prompt, prompt_mode=args.prompt_mode)
+        readme_content = provider.call_llm(generated_prompt)
     except RuntimeError as e:
         print(f"[에러] {e}", file=sys.stderr)
         return 1
 
+    # 결과 출력/저장
     if args.stdout:
         sys.stdout.write(readme_content)
     else:

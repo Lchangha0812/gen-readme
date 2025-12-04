@@ -4,6 +4,7 @@ import sys
 def _execute_gemini_command(gemini_path: str, args: list[str]) -> subprocess.Popen:
     """gemini CLI 명령을 실행하고 Popen 객체를 반환한다."""
     command = [gemini_path] + args
+    print(f"[DEBUG] Executing command: {' '.join(command)}", file=sys.stderr)
     
     return subprocess.Popen(
         command,

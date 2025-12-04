@@ -19,9 +19,3 @@ def get_provider(name: str) -> ReadmeProvider:
         raise ValueError(f"알 수 없는 제공자입니다: {name}")
     return provider_class()
 
-
-def get_available_providers() -> list[str]:
-    """
-    사용 가능한 모든 제공자의 이름 목록을 반환합니다.
-    """
-    return list(PROVIDERS.keys())
